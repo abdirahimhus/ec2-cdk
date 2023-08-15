@@ -8,6 +8,11 @@ import { Vpc, SubnetType, Peer, Port, AmazonLinuxGeneration,
 } from 'aws-cdk-lib/aws-ec2';
 
 import { Role, ServicePrincipal, ManagedPolicy } from 'aws-cdk-lib/aws-iam';
+import { Pipeline, Artifact } from 'aws-cdk-lib/aws-codepipeline';
+import { GitHubSourceAction, CodeBuildAction, CodeDeployServerDeployAction } from 'aws-cdk-lib/aws-codepipeline-actions';
+import { PipelineProject, LinuxBuildImage } from 'aws-cdk-lib/aws-codebuild';
+import { ServerDeploymentGroup, ServerApplication, InstanceTagSet } from 'aws-cdk-lib/aws-codedeploy';
+import { SecretValue } from 'aws-cdk-lib';
 
 export class PythonEc2BlogpostStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -58,7 +63,7 @@ export class PythonEc2BlogpostStack extends cdk.Stack {
       description: "Allows Inbound HTTP traffic to the web server.",
       allowAllOutbound: true,
     });
-
+    
     webSg.addIngressRule(
       Peer.anyIpv4(),
       Port.tcp(80)
@@ -76,7 +81,7 @@ export class PythonEc2BlogpostStack extends cdk.Stack {
     const webServer = new Instance(this, 'web_server',{
       vpc,
       instanceType: InstanceType.of(
-        InstanceClass.T2,
+        InstanceClass.T3,
         InstanceSize.MICRO,
       ),
       machineImage: ami,
@@ -90,6 +95,86 @@ export class PythonEc2BlogpostStack extends cdk.Stack {
     // Tag the instance
     cdk.Tags.of(webServer).add('application-name','python-web')
     cdk.Tags.of(webServer).add('stage','prod')
+    
+    // Pipeline stuff
+    // CodePipeline
+    const pipeline = new Pipeline(this, 'python_web_pipeline', {
+      pipelineName: 'python-webApp',
+      crossAccountKeys: false, // solves the encrypted bucket issue
+    });
+
+    // STAGES
+    // Source Stage
+    const sourceStage = pipeline.addStage({
+      stageName: 'Source',
+    });
+    
+    // Build Stage
+    const buildStage = pipeline.addStage({
+      stageName: 'Build',
+    });
+    
+    // Deploy Stage
+    const deployStage = pipeline.addStage({
+      stageName: 'Deploy',
+    });
+
+    // Add some action
+    // Source action
+    const sourceOutput = new Artifact();
+    const githubSourceAction = new GitHubSourceAction({
+      actionName: 'GithubSource',
+      oauthToken: SecretValue.secretsManager('github-oauth-token'), // SET UP BEFORE
+      owner: 'darko-mesaros', // THIS NEEDS TO BE CHANGED TO THE READER
+      repo: 'sample-python-web-app',
+      branch: 'main',
+      output: sourceOutput,
+    });
+
+    sourceStage.addAction(githubSourceAction);
+
+    // Build Action
+    const pythonTestProject = new PipelineProject(this, 'pythonTestProject', {
+      environment: {
+        buildImage: LinuxBuildImage.AMAZON_LINUX_2_3
+      }
+    });
+    
+    const pythonTestOutput = new Artifact();
+    const pythonTestAction = new CodeBuildAction({
+      actionName: 'TestPython',
+      project: pythonTestProject,
+      input: sourceOutput,
+      outputs: [pythonTestOutput]
+    });
+
+    buildStage.addAction(pythonTestAction);
+
+    // Deploy Actions
+    const pythonDeployApplication = new ServerApplication(this,"python_deploy_application", {
+      applicationName: 'python-webApp'
+    });
+
+    // Deployment group
+    const pythonServerDeploymentGroup = new ServerDeploymentGroup(this,'PythonAppDeployGroup', {
+      application: pythonDeployApplication,
+      deploymentGroupName: 'PythonAppDeploymentGroup',
+      installAgent: true,
+      ec2InstanceTags: new InstanceTagSet(
+      {
+        'application-name': ['python-web'],
+        'stage':['prod', 'stage']
+      })
+    });
+
+    // Deployment action
+    const pythonDeployAction = new CodeDeployServerDeployAction({
+      actionName: 'PythonAppDeployment',
+      input: sourceOutput,
+      deploymentGroup: pythonServerDeploymentGroup,
+    });
+
+    deployStage.addAction(pythonDeployAction);
 
     // Output the public IP address of the EC2 instance
     new cdk.CfnOutput(this, "IP Address", {
