@@ -15,7 +15,7 @@ new PythonEc2BlogpostStack(app, 'Ec2CdkStack', {
 
   /* Uncomment the next line if you know exactly what Account and Region you
    * want to deploy the stack to. */
-  env: { account: '157158702269', region: 'eu-west-1' },
+  env: { account: '157158702269', region: 'euwest1' },
 
   
 });
